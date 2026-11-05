@@ -1,0 +1,268 @@
+import React, { useState, useEffect } from 'react';
+import {
+  View,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  FlatList,
+  ActivityIndicator,
+  StyleSheet,
+  Image,
+  SafeAreaView,
+  StatusBar
+} from 'react-native';
+import * as Location from 'expo-location';
+
+import { db } from './firebaseConfig'; 
+import { collection, onSnapshot, query } from 'firebase/firestore';
+
+// ✅ ใช้ API Key เดียวกับ MapScreen
+const GOOGLE_MAPS_APIKEY = 'AIzaSyCzLA0NWNQk5Iu9AzC0yW1bwQ0Y_KqngSQ';
+
+const categories = ['ทั้งหมด', 'โรงพยาบาล', 'สถานีตำรวจ', 'กู้ภัย', 'สถานีดับเพลิง'];
+
+const formatDistance = (meters) => {
+  if (meters < 1000) return `${Math.round(meters)} ม.`;
+  return `${(meters / 1000).toFixed(1)} กม.`;
+};
+
+export default function SearchScreen({ onBack, onGoHome, onGoSOS, onGoSearch, onGoProfile, goToDetail }) {
+  const [searchText, setSearchText] = useState('');
+  const [selectedCategory, setSelectedCategory] = useState('ทั้งหมด');
+  const [locations, setLocations] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [userLocation, setUserLocation] = useState(null);
+  // ✅ เก็บระยะทางถนนจริงของทุกสถานที่ { [id]: distanceInMeters }
+  const [roadDistances, setRoadDistances] = useState({});
+
+  // ดึง GPS
+  useEffect(() => {
+    (async () => {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') return;
+      const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+      setUserLocation(loc.coords);
+    })();
+  }, []);
+
+  // ดึงข้อมูลจาก Firestore
+  useEffect(() => {
+    const q = query(collection(db, 'facilities'));
+    const unsubscribe = onSnapshot(q, (querySnapshot) => {
+      const dataList = querySnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+      setLocations(dataList);
+      setLoading(false);
+    }, (error) => {
+      console.error("Firebase Error: ", error);
+      setLoading(false);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // ✅ เรียก Distance Matrix API 1 ครั้ง เมื่อได้ทั้ง userLocation และ locations
+  useEffect(() => {
+    if (!userLocation || locations.length === 0) return;
+
+    // กรองเฉพาะสถานที่ที่มีพิกัด
+    const validLocations = locations.filter(
+      item => item.พิกัด?.latitude && item.พิกัด?.longitude
+    );
+    if (validLocations.length === 0) return;
+
+    const origin = `${userLocation.latitude},${userLocation.longitude}`;
+
+    // ส่งจุดหมายทุกแห่งใน 1 request (คั่นด้วย |)
+    const destinations = validLocations
+      .map(item => `${item.พิกัด.latitude},${item.พิกัด.longitude}`)
+      .join('|');
+
+    const url = `https://maps.googleapis.com/maps/api/distancematrix/json?origins=${origin}&destinations=${destinations}&mode=driving&key=${GOOGLE_MAPS_APIKEY}`;
+
+    fetch(url)
+      .then(res => res.json())
+      .then(data => {
+        if (data.status !== 'OK') return;
+        const elements = data.rows[0]?.elements || [];
+        const newDistances = {};
+        validLocations.forEach((item, index) => {
+          const el = elements[index];
+          if (el?.status === 'OK') {
+            newDistances[item.id] = el.distance.value; // หน่วยเมตร
+          }
+        });
+        setRoadDistances(newDistances);
+      })
+      .catch(err => console.error("Distance Matrix Error:", err));
+  }, [userLocation, locations]);
+
+  const filteredData = locations.filter(item => {
+    const matchCategory =
+      selectedCategory === 'ทั้งหมด' || item.ประเภท === selectedCategory;
+    const matchText = (item.ชื่อ || '')
+      .toLowerCase()
+      .includes(searchText.toLowerCase().trim());
+    return matchCategory && matchText;
+  });
+
+  return (
+    <View style={styles.container}>
+      <StatusBar barStyle="dark-content" />
+      <SafeAreaView style={styles.safeArea}>
+        
+        {/* Header Section */}
+        <View style={styles.headerContainer}>
+          <TouchableOpacity onPress={onBack} style={styles.backButton}>
+          </TouchableOpacity>
+          <View style={styles.header}>
+            <Text style={styles.headerTitle}>Ksafe</Text>
+            <Text style={styles.titleText}>ค้นหาสถานที่</Text>
+          </View>
+          <TextInput
+            placeholder="ค้นหาสถานที่..."
+            value={searchText}
+            onChangeText={setSearchText}
+            placeholderTextColor="#999"
+            style={styles.searchInput}
+          />
+
+          {/* หมวดหมู่ */}
+          <View style={styles.categoryWrapper}>
+            <View style={styles.categoryContainer}>
+              {categories.map((cat) => (
+                <TouchableOpacity
+                  key={cat}
+                  onPress={() => setSelectedCategory(cat)}
+                  style={[
+                    styles.categoryButton,
+                    { backgroundColor: selectedCategory === cat ? '#ff7a00' : '#f0f0f0' }
+                  ]}
+                >
+                  <Text style={[
+                    styles.categoryText,
+                    { 
+                      color: selectedCategory === cat ? '#fff' : '#555',
+                      fontWeight: selectedCategory === cat ? 'bold' : 'normal'
+                    }
+                  ]}>
+                    {cat}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
+        </View>
+
+        {/* รายการสถานที่ */}
+        {loading ? (
+          <ActivityIndicator size="large" color="#ff7a00" style={{ marginTop: 50 }} />
+        ) : (
+          <FlatList
+            data={filteredData}
+            keyExtractor={(item) => item.id}
+            contentContainerStyle={styles.listContent}
+            showsVerticalScrollIndicator={false}
+            renderItem={({ item }) => {
+              // ✅ ดึงระยะทางถนนจริงจาก state
+              const distanceLabel = roadDistances[item.id] !== undefined
+                ? formatDistance(roadDistances[item.id])
+                : '-- ม.';
+
+              return (
+                <View style={styles.card}>
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+                    <Text style={styles.cardTitle} numberOfLines={1}>
+                      {item.ชื่อ}
+                    </Text>
+                    <Text style={styles.distanceText}>{distanceLabel}</Text>
+                  </View>
+                  
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 8 }}>
+                    <Text style={styles.cardAddress} numberOfLines={2}>
+                      {item.ที่อยู่}
+                    </Text>
+                    <TouchableOpacity
+                      onPress={() => goToDetail(item)}
+                      style={styles.infoButton}
+                    >
+                      <Text style={styles.infoButtonText}>i</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              );
+            }}
+            ListEmptyComponent={
+              <View style={styles.emptyContainer}>
+                <Text style={{ color: '#999', fontSize: 16 }}>ไม่พบข้อมูลที่ค้นหา</Text>
+              </View>
+            }
+          />
+        )}
+      </SafeAreaView>
+
+      {/* Navigation Footer */}
+      <View style={styles.footer}>
+        <TouchableOpacity style={styles.footerButton} onPress={onGoHome}>
+          <Image source={require('./assets/home (2).png')} style={[styles.footerIcon, { tintColor: '#929292' }]} />
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.footerButton} onPress={onGoSOS}>
+          <Image source={require('./assets/emergency (1).png')} style={[styles.footerIcon, { tintColor: '#929292' }]} />
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.footerButton} onPress={onGoSearch}>
+          <Image source={require('./assets/map (1).png')} style={[styles.footerIcon, { tintColor: '#F87C47' }]} />
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.footerButton} onPress={onGoProfile}>
+          <Image source={require('./assets/user.png')} style={[styles.footerIcon, { tintColor: '#D9D9D9' }]} />
+        </TouchableOpacity>
+      </View>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: '#fff' },
+  safeArea: { flex: 1 },
+  headerContainer: { paddingHorizontal: 20, paddingTop: 10 },
+  backButton: { paddingVertical: 5 },
+  searchInput: {
+    borderWidth: 1, borderColor: '#eee', borderRadius: 15,
+    padding: 15, marginVertical: 10, fontSize: 16, backgroundColor: '#fcfcfc',
+    shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05, shadowRadius: 4, elevation: 2,
+  },
+  categoryWrapper: { marginBottom: 10 },
+  categoryContainer: { flexDirection: 'row', flexWrap: 'wrap' },
+  categoryButton: { paddingHorizontal: 16, paddingVertical: 8, margin: 4, borderRadius: 20 },
+  categoryText: { fontSize: 14 },
+  listContent: { paddingHorizontal: 20, paddingTop: 10, paddingBottom: 110 },
+  card: {
+    backgroundColor: '#fff', padding: 18, borderRadius: 20, marginBottom: 15,
+    borderWidth: 1, borderColor: '#f0f0f0',
+    shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05, shadowRadius: 8, elevation: 3,
+  },
+  cardTitle: { fontSize: 17, fontWeight: 'bold', flex: 1, color: '#333' },
+  distanceText: { color: '#ff7a00', fontSize: 13, fontWeight: '600' },
+  cardAddress: { color: '#777', fontSize: 14, flex: 1, marginRight: 10, lineHeight: 20 },
+  infoButton: {
+    width: 36, height: 36, borderRadius: 18, backgroundColor: '#fff',
+    borderWidth: 1, borderColor: '#eee', justifyContent: 'center', alignItems: 'center',
+  },
+  infoButtonText: { fontSize: 16, color: '#ff7a00', fontWeight: 'bold' },
+  emptyContainer: { marginTop: 60, alignItems: 'center' },
+  footer: {
+    position: 'absolute', bottom: 0, flexDirection: 'row', justifyContent: 'space-around',
+    alignItems: 'center', width: '100%', height: 90, backgroundColor: '#FFF',
+    borderTopWidth: 1, borderTopColor: '#F0F0F0', paddingBottom: 25,
+    shadowColor: '#000', shadowOffset: { width: 0, height: -3 },
+    shadowOpacity: 0.05, shadowRadius: 5, elevation: 10,
+  },
+  footerButton: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  footerIcon: { width: 26, height: 26, resizeMode: 'contain' },
+  header: { padding: 5, paddingBottom: 5 },
+  headerTitle: { fontSize: 32, fontWeight: '800', color: '#666' },
+  brandText: { fontSize: 22, fontWeight: 'bold' },
+  titleText: { fontSize: 15, color: '#666' },
+});
